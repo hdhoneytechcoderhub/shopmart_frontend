@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-slate-50 text-ink font-sans antialiased dark:bg-slate-950 dark:text-slate-100;
+  }
+  h1, h2, h3, h4 {
+    @apply font-display tracking-tight text-ink dark:text-slate-50;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-white dark:ring-offset-slate-950;
+  }
+}
+
+@layer components {
+  .container-page {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold
+      transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50 select-none;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700 active:scale-[0.98] shadow-sm;
+  }
+  .btn-accent {
+    @apply btn bg-accent-500 text-white hover:bg-accent-600 active:scale-[0.98] shadow-sm;
+  }
+  .btn-outline {
+    @apply btn border border-slate-300 bg-white text-ink-soft hover:border-slate-400 hover:bg-slate-50
+      dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
+  }
+  .btn-ghost {
+    @apply btn text-ink-soft hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700;
+  }
+
+  /* Inputs */
+  .field {
+    @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-ink
+      placeholder:text-slate-400 transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100
+      dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:ring-brand-900;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-ink-soft dark:text-slate-300;
+  }
+
+  /* Surfaces */
+  .card {
+    @apply rounded-2xl border border-slate-200 bg-white shadow-card dark:border-slate-800 dark:bg-slate-900;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-ink-soft
+      dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold;
+  }
+
+  .link {
+    @apply text-brand-700 underline-offset-2 hover:underline dark:text-brand-300;
+  }
+}
+
+/* Hide number input spinners */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/*
+ * Dark-mode surface mapping.
+ * These rules retrofit dark styling onto the common Tailwind utilities used inline
+ * throughout the app, so pages adapt without editing every component. Placed after
+ * the @tailwind layers so they win on equal specificity.
+ */
+.dark .bg-white { background-color: #0f172a !important; }
+.dark .bg-slate-50 { background-color: #0b1220 !important; }
+.dark .bg-slate-100 { background-color: #1e293b !important; }
+.dark .bg-slate-100\/60 { background-color: rgba(30,41,59,0.6) !important; }
+.dark .bg-slate-50\/60 { background-color: rgba(15,23,42,0.6) !important; }
+.dark .bg-slate-50\/40 { background-color: rgba(15,23,42,0.4) !important; }
+
+.dark .text-ink { color: #e2e8f0 !important; }
+.dark .text-ink-soft { color: #cbd5e1 !important; }
+.dark .text-ink-muted { color: #94a3b8 !important; }
+
+.dark .border-slate-100 { border-color: #1f2937 !important; }
+.dark .border-slate-200 { border-color: #283449 !important; }
+.dark .border-slate-300 { border-color: #334155 !important; }
+
+.dark .divide-slate-100 > * + * { border-color: #1f2937 !important; }
+
+/* Brand/accent tints sit a touch deeper on dark surfaces for legibility. */
+.dark .bg-brand-50 { background-color: rgba(79,70,229,0.16) !important; }
+.dark .bg-brand-100 { background-color: rgba(79,70,229,0.22) !important; }
+.dark .bg-accent-50 { background-color: rgba(249,115,22,0.15) !important; }
+.dark .bg-emerald-50 { background-color: rgba(16,185,129,0.14) !important; }
+.dark .bg-amber-50 { background-color: rgba(245,158,11,0.14) !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
