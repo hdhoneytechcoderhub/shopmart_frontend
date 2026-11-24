@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { User, Mail, Phone, Lock, Eye, EyeOff, UserPlus } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { authService } from '../services/authService';
@@ -8,6 +8,8 @@ import { isEmail, isPhone, minLen, required } from '../utils/validators';
 
 export default function Register() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const from = location.state?.from || '';
   const [form, setForm] = useState({ name: '', email: '', phone: '', password: '', confirm: '' });
   const [errors, setErrors] = useState({});
   const [showPw, setShowPw] = useState(false);
@@ -34,14 +36,14 @@ export default function Register() {
         name: form.name, email: form.email, phone: form.phone, password: form.password,
       });
       toast.success('Account created! Verify the OTP sent to you.');
-      navigate('/verify-otp', { state: { email: form.email } });
+      navigate('/verify-otp', { state: { email: form.email, from } });
     } catch (err) {
       if (err?.response) {
         toast.error(err.response.data?.message || 'Registration failed');
       } else {
         // Demo fallback: no backend — proceed to OTP step.
         toast.success('Account created (demo). Verify the OTP to continue.');
-        navigate('/verify-otp', { state: { email: form.email, demo: true } });
+        navigate('/verify-otp', { state: { email: form.email, from, demo: true } });
       }
     } finally {
       setSubmitting(false);
@@ -110,7 +112,7 @@ export default function Register() {
 
       <p className="mt-6 text-center text-sm text-ink-muted">
         Already have an account?{' '}
-        <Link to="/login" className="link font-medium">Sign in</Link>
+        <Link to="/login" state={{ from }} className="link font-medium">Sign in</Link>
       </p>
     </div>
   );

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useLocation, Link } from 'react-router-dom';
-import { CheckCircle2, Package, ArrowRight, Download, FileText, Truck } from 'lucide-react';
+import { CheckCircle2, Package, ArrowRight, Download, FileText, Truck, AlertTriangle, MapPin } from 'lucide-react';
 import { accountService } from '../services/accountService';
 import { downloadInvoice } from '../utils/invoice';
 import { formatPrice, formatDate } from '../utils/format';
@@ -22,23 +22,27 @@ export default function OrderSuccess() {
     return () => { active = false; };
   }, [id, order]);
 
-  const total = order?.total ?? (order?.items?.reduce((s, it) => s + it.price * it.quantity, 0) || 0) + (order?.shipping || 0) - (order?.discount || 0);
+  const total = order?.total ?? (order?.items?.reduce((s, it) => s + it.price * it.quantity, 0) || 0) + Number(order?.shipping || 0) - Number(order?.discount || 0);
+  const paid = !order || order.paymentStatus === 'PAID';
+  const displayId = order?.orderNumber || id;
 
   return (
     <div className="container-page flex flex-col items-center py-12 text-center">
-      <span className="grid h-20 w-20 place-items-center rounded-full bg-emerald-100 text-emerald-600 animate-slide-up">
-        <CheckCircle2 className="h-10 w-10" />
+      <span className={`grid h-20 w-20 place-items-center rounded-full ${paid ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'} animate-slide-up`}>
+        {paid ? <CheckCircle2 className="h-10 w-10" /> : <AlertTriangle className="h-10 w-10" />}
       </span>
-      <h1 className="mt-6 text-3xl font-bold">Order confirmed!</h1>
+      <h1 className="mt-6 text-3xl font-bold">{paid ? 'Order confirmed!' : 'Payment not confirmed'}</h1>
       <p className="mt-2 max-w-md text-ink-muted">
-        Thank you for your purchase. We've emailed your receipt and will notify you when your order ships.
+        {paid
+          ? "Thank you for your purchase. We've emailed your receipt and will notify you when your order ships."
+          : 'Our server has not confirmed a successful payment for this order yet. No paid order has been created.'}
       </p>
 
       <div className="mt-6 w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 text-left">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-xs text-ink-muted">Order number</p>
-            <p className="text-lg font-bold tracking-wide">#{id}</p>
+            <p className="text-xs text-ink-muted">ShopMart Order ID</p>
+            <p className="text-lg font-bold tracking-wide">#{displayId}</p>
           </div>
           {order && (
             <div className="text-right">
@@ -55,7 +59,9 @@ export default function OrderSuccess() {
             <div className="mt-4 divide-y divide-slate-100 border-t border-slate-100">
               {(order.items || []).map((it, i) => (
                 <div key={i} className="flex items-center gap-3 py-3">
-                  <img src={it.image} alt="" className="h-12 w-12 rounded-lg object-cover" />
+                  {it.image
+                    ? <img src={it.image} alt="" className="h-12 w-12 rounded-lg object-cover" />
+                    : <span className="grid h-12 w-12 place-items-center rounded-lg bg-slate-100 text-slate-400"><Package className="h-5 w-5" /></span>}
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium text-ink">{it.name}</p>
                     <p className="text-xs text-ink-muted">Qty {it.quantity}{it.size ? ` · ${it.size}` : ''}{it.color ? ` · ${it.color}` : ''}</p>
@@ -65,9 +71,17 @@ export default function OrderSuccess() {
               ))}
             </div>
             <dl className="mt-3 space-y-1.5 border-t border-slate-100 pt-3 text-sm">
-              <div className="flex justify-between"><dt className="text-ink-muted">Payment</dt><dd className="font-medium text-ink">{order.paymentMethod} · {order.paymentStatus || 'Paid'}</dd></div>
-              <div className="flex justify-between text-base font-bold text-ink"><dt>Total</dt><dd>{formatPrice(total)}</dd></div>
+              <div className="flex justify-between"><dt className="text-ink-muted">Payment</dt><dd className="font-medium text-ink">{order.paymentMethod === 'RAZORPAY' ? 'Razorpay' : (order.paymentMethod || 'Razorpay')} · {order.paymentStatus || 'Pending'}</dd></div>
+              <div className="flex justify-between text-base font-bold text-ink"><dt>Total paid</dt><dd>{formatPrice(total)}</dd></div>
             </dl>
+            {order.address && (
+              <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-soft">
+                <p className="mb-1 inline-flex items-center gap-1 font-semibold text-ink"><MapPin className="h-3.5 w-3.5" /> Delivery address</p>
+                <p className="font-medium text-ink">{order.address.name}</p>
+                <p>{[order.address.line1, order.address.line2, order.address.city, order.address.state, order.address.postalCode || order.address.pincode, order.address.country].filter(Boolean).join(', ')}</p>
+                {order.address.phone && <p>Phone: {order.address.phone}</p>}
+              </div>
+            )}
             {order.estimatedDelivery && (
               <p className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
                 <Truck className="h-3.5 w-3.5" /> Estimated delivery by {formatDate(order.estimatedDelivery)}
@@ -75,18 +89,18 @@ export default function OrderSuccess() {
             )}
           </>
         ) : (
-          <p className="mt-4 border-t border-slate-100 pt-4 text-sm text-ink-muted">Your order has been placed successfully.</p>
+          <p className="mt-4 border-t border-slate-100 pt-4 text-sm text-ink-muted">Your order could not be loaded.</p>
         )}
       </div>
 
       <div className="mt-8 flex flex-wrap justify-center gap-3">
-        {order && (
+        {order && paid && (
           <button onClick={() => downloadInvoice(order)} className="btn-primary">
             <Download className="h-4 w-4" /> Download Invoice
           </button>
         )}
-        <Link to={`/dashboard/orders/${id}`} className="btn-outline"><FileText className="h-4 w-4" /> View Order</Link>
-        <Link to={`/track?id=${id}`} className="btn-outline"><Package className="h-4 w-4" /> Track Order</Link>
+        {order && <Link to={`/dashboard/orders/${order.id}`} className="btn-outline"><FileText className="h-4 w-4" /> View Order</Link>}
+        {!paid && order && <Link to={`/checkout?order=${order.id}`} className="btn-accent">Retry payment <ArrowRight className="h-4 w-4" /></Link>}
         <Link to="/shop" className="btn-ghost">Continue shopping <ArrowRight className="h-4 w-4" /></Link>
       </div>
     </div>

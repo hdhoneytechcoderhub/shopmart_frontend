@@ -8,6 +8,7 @@ import { useAuth } from '../hooks/useAuth';
 import Spinner from '../components/common/Spinner';
 import { isEmail, required } from '../utils/validators';
 import { ROLES } from '../utils/constants';
+import { DEMO_MODE } from '../services/api';
 
 export default function Login() {
   const dispatch = useDispatch();
@@ -35,9 +36,12 @@ export default function Login() {
     if (loginUser.fulfilled.match(result)) {
       const user = result.payload;
       toast.success(`Welcome back, ${user.name || 'shopper'}!`);
-      if (user.role === ROLES.SUPER_ADMIN) navigate('/superadmin', { replace: true });
+      // Always return to the protected page that sent the customer here (e.g. checkout)
+      // before falling back to the role's home page.
+      if (from && from !== '/') navigate(from, { replace: true });
+      else if (user.role === ROLES.SUPER_ADMIN) navigate('/superadmin', { replace: true });
       else if (user.role === ROLES.ADMIN) navigate('/admin', { replace: true });
-      else navigate(from, { replace: true });
+      else navigate('/', { replace: true });
     } else {
       toast.error(result.payload || 'Login failed');
     }
@@ -107,12 +111,15 @@ export default function Login() {
 
       <p className="mt-6 text-center text-sm text-ink-muted">
         New to ShopMart?{' '}
-        <Link to="/register" className="link font-medium">Create an account</Link>
+        <Link to="/register" state={{ from }} className="link font-medium">Create an account</Link>
       </p>
 
-      <p className="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-center text-xs text-ink-muted">
-        Demo mode: any email works. Use an email starting with <span className="font-medium">admin</span> to explore the admin panel.
-      </p>
+      {DEMO_MODE && (
+        <p className="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-center text-xs text-ink-muted">
+          Demo mode: any email works. Use an email starting with <span className="font-medium">admin</span> to explore the admin panel.
+          Checkout and payments are disabled in demo mode.
+        </p>
+      )}
     </div>
   );
 }

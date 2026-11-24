@@ -1,10 +1,11 @@
 import axios from 'axios';
 import { API_BASE_URL, STORAGE } from '../utils/constants';
 
-// Demo mode runs the whole app on bundled local mock data with NO backend calls.
-// Default: ON (so the project runs standalone on localhost). To use the real API
-// instead, set VITE_DEMO_MODE=false in your .env.
-export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE !== 'false';
+// Demo mode runs the app on bundled local mock data with NO backend calls.
+// Default: OFF. The storefront checkout, payments and orders always require the
+// real Spring Boot backend; demo mode must be opted into explicitly for UI-only
+// walkthroughs (`VITE_DEMO_MODE=true`) and must never be used for payments.
+export const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true';
 
 // Central axios instance pointed at the Spring Boot backend (/api context path).
 const api = axios.create({

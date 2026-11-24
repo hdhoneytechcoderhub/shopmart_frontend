@@ -6,15 +6,18 @@ export default function PaymentFailure() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const reason = params.get('reason');
+  const cancelled = params.get('status') === 'cancelled';
 
   return (
     <div className="container-page flex flex-col items-center py-16 text-center">
       <span className="grid h-20 w-20 place-items-center rounded-full bg-red-100 text-red-600">
         <XCircle className="h-10 w-10" />
       </span>
-      <h1 className="mt-6 text-3xl font-bold">Payment failed</h1>
+      <h1 className="mt-6 text-3xl font-bold">{cancelled ? 'Payment cancelled' : 'Payment failed'}</h1>
       <p className="mt-2 max-w-md text-ink-muted">
-        {reason || "We couldn't complete the payment for this order. Your cart and address are still saved — nothing was charged."}
+        {reason || (cancelled
+          ? 'You closed the Razorpay window before completing payment. Your cart and delivery address are still saved, and no order has been confirmed.'
+          : "We couldn't complete the payment for this order. Your cart and address are still saved — no confirmed order or charge was created.")}
       </p>
 
       {id && (
@@ -24,7 +27,7 @@ export default function PaymentFailure() {
       )}
 
       <div className="mt-8 flex flex-wrap justify-center gap-3">
-        <button onClick={() => navigate('/checkout')} className="btn-primary">
+        <button onClick={() => navigate(id ? `/checkout?order=${id}` : '/checkout')} className="btn-primary">
           <RotateCcw className="h-4 w-4" /> Retry payment
         </button>
         <button onClick={() => navigate('/dashboard/orders')} className="btn-outline">

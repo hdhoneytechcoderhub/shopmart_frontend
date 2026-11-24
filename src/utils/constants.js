@@ -36,6 +36,7 @@ export const STORAGE = {
 export const ORDER_STATUS = {
   PENDING: 'PENDING',
   CONFIRMED: 'CONFIRMED',
+  PROCESSING: 'PROCESSING',
   PACKED: 'PACKED',
   SHIPPED: 'SHIPPED',
   DELIVERED: 'DELIVERED',
@@ -44,8 +45,9 @@ export const ORDER_STATUS = {
 };
 
 export const ORDER_STATUS_META = {
-  PENDING: { label: 'Pending', tone: 'bg-amber-100 text-amber-700' },
+  PENDING: { label: 'Pending payment', tone: 'bg-amber-100 text-amber-700' },
   CONFIRMED: { label: 'Confirmed', tone: 'bg-blue-100 text-blue-700' },
+  PROCESSING: { label: 'Processing', tone: 'bg-indigo-100 text-indigo-700' },
   PACKED: { label: 'Packed', tone: 'bg-indigo-100 text-indigo-700' },
   SHIPPED: { label: 'Shipped', tone: 'bg-purple-100 text-purple-700' },
   DELIVERED: { label: 'Delivered', tone: 'bg-emerald-100 text-emerald-700' },
@@ -58,7 +60,9 @@ export const PAYMENT_STATUS_META = {
   INITIATED: { label: 'Initiated', tone: 'bg-amber-100 text-amber-700' },
   PAID: { label: 'Paid', tone: 'bg-emerald-100 text-emerald-700' },
   FAILED: { label: 'Failed', tone: 'bg-red-100 text-red-700' },
+  CANCELLED: { label: 'Cancelled', tone: 'bg-slate-100 text-slate-600' },
   REFUNDED: { label: 'Refunded', tone: 'bg-slate-100 text-slate-600' },
+  PARTIALLY_REFUNDED: { label: 'Partially refunded', tone: 'bg-slate-100 text-slate-600' },
 };
 
 // Razorpay is the only gateway — UPI / Card / Net Banking / Wallets are all

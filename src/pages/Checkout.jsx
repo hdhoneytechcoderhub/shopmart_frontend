@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import {
   MapPin, CreditCard, Check, Plus, Star, Pencil, Smartphone,
@@ -14,17 +14,57 @@ import { COUPONS } from '../utils/coupons';
 import { accountService } from '../services/accountService';
 import { cartService } from '../services/cartService';
 import { razorpayService } from '../services/razorpayService';
+import { DEMO_MODE } from '../services/api';
 import { addNotification } from '../redux/slices/notificationSlice';
 import { mockAddresses } from '../services/mockAccount';
-import { isPhone, required } from '../utils/validators';
+import { isEmail, isPhone, required } from '../utils/validators';
 import { formatPrice } from '../utils/format';
 import Modal from '../components/common/Modal';
 
 const STEPS = ['Address', 'Payment', 'Review'];
-const EMPTY = { label: 'Home', name: '', phone: '', line1: '', line2: '', city: '', state: '', pincode: '', isDefault: false };
+const EMPTY = {
+  label: 'Home', name: '', phone: '', email: '', line1: '', line2: '',
+  city: '', state: '', pincode: '', country: 'India', isDefault: false,
+};
+const PENDING_KEY = 'sm_pending_order_v1';
+const IDEMPOTENCY_KEY = 'sm_checkout_idempotency_v1';
+
+const readPending = () => {
+  try {
+    const raw = sessionStorage.getItem(PENDING_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+};
+const writePending = (value) => {
+  try {
+    if (value) sessionStorage.setItem(PENDING_KEY, JSON.stringify(value));
+    else sessionStorage.removeItem(PENDING_KEY);
+  } catch { /* ignore */ }
+};
+const newIdempotencyKey = () =>
+  (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `sm-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const readIdempotencyKey = () => {
+  try { return sessionStorage.getItem(IDEMPOTENCY_KEY); } catch { return null; }
+};
+const ensureIdempotencyKey = () => {
+  let key = readIdempotencyKey();
+  if (!key) {
+    key = newIdempotencyKey();
+    try { sessionStorage.setItem(IDEMPOTENCY_KEY, key); } catch { /* ignore */ }
+  }
+  return key;
+};
+const clearIdempotencyKey = () => {
+  try { sessionStorage.removeItem(IDEMPOTENCY_KEY); } catch { /* ignore */ }
+};
 
 export default function Checkout() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const retryOrderId = searchParams.get('order');
   const dispatch = useDispatch();
   const { items, subtotal, clear } = useCart();
   const { user } = useAuth();
@@ -45,7 +85,42 @@ export default function Checkout() {
   const [phase, setPhase] = useState('idle'); // idle | processing | done | failed
   const [statusText, setStatusText] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [pendingOrder, setPendingOrder] = useState(null);
+  const [restoring, setRestoring] = useState(() => !!readPending() || !!searchParams.get('order'));
   const createdOrderRef = useRef(null); // reuse the same order on retry
+  const placingRef = useRef(false);     // absorbs repeated clicks
+
+  // Shipping rules mirror OrderServiceImpl (free over ₹499, otherwise ₹49) so the
+  // amount shown here matches the server-calculated Razorpay amount.
+  const isFreeShip = coupon?.code === 'FREESHIP';
+  const baseShipping = subtotal >= 499 || subtotal === 0 ? 0 : 49;
+  const shipping = isFreeShip ? 0 : baseShipping;
+  const discount = isFreeShip ? 0 : (coupon?.discount || 0);
+  const cartTotal = Math.max(0, subtotal + shipping - discount);
+  const payable = pendingOrder?.total != null ? Number(pendingOrder.total) : cartTotal;
+
+  const selectedAddress = addresses.find((a) => a.id === selectedId) || null;
+  const pendingAddress = pendingOrder?.address
+    ? { ...pendingOrder.address, pincode: pendingOrder.address.postalCode || pendingOrder.address.pincode }
+    : null;
+  const activeAddress = selectedAddress || pendingAddress;
+
+  const [couponCode, setCouponCode] = useState('');
+  const [couponValidating, setCouponValidating] = useState(false);
+
+  const finishSuccess = (order) => {
+    writePending(null);
+    clearIdempotencyKey();
+    setPendingOrder(null);
+    createdOrderRef.current = null;
+    clear();
+    dispatch(addNotification({
+      category: 'ORDER', icon: 'box', title: 'Payment successful',
+      body: `Your order ${order.orderNumber || order.id} has been confirmed. We'll notify you when it ships.`,
+      link: `/dashboard/orders/${order.id}`,
+    }));
+    navigate(`/order-success/${order.id}`, { replace: true, state: { order } });
+  };
 
   useEffect(() => {
     let active = true;
@@ -64,17 +139,55 @@ export default function Checkout() {
     return () => { active = false; };
   }, []);
 
-  const isFreeShip = coupon?.code === 'FREESHIP';
-  const baseShipping = subtotal > 999 || subtotal === 0 ? 0 : 79;
-  const freeShip = isFreeShip;
-  const shipping = freeShip ? 0 : baseShipping;
-  const discount = freeShip ? 0 : (coupon?.discount || 0);
-  const total = Math.max(0, subtotal + shipping - discount);
-
-  const selectedAddress = addresses.find((a) => a.id === selectedId) || null;
-
-  const [couponCode, setCouponCode] = useState('');
-  const [couponValidating, setCouponValidating] = useState(false);
+  // Restore a pending order after a refresh: the customer keeps the same order
+  // (and Razorpay order) instead of creating a duplicate.
+  useEffect(() => {
+    let active = true;
+    const restore = async () => {
+      const saved = readPending();
+      const candidateId = retryOrderId || saved?.id;
+      if (!candidateId) { setRestoring(false); return; }
+      const explicitRetry = String(candidateId) === String(retryOrderId);
+      try {
+        const order = await accountService.getOrder(candidateId);
+        if (!active) return;
+        if (order?.paymentStatus === 'PAID') {
+          finishSuccess(order);
+          return;
+        }
+        if (order?.status === 'CANCELLED') {
+          writePending(null);
+          clearIdempotencyKey();
+          return;
+        }
+        // If the cart changed since this order was created, it is stale: cancel it
+        // (best effort) and let the customer create a fresh order. An explicit
+        // "retry payment" from My Orders always keeps the order.
+        if (explicitRetry || Math.abs(Number(order.total) - Number(cartTotal)) < 0.01) {
+          createdOrderRef.current = order;
+          setPendingOrder(order);
+          setStep(2);
+          writePending({
+            id: order.id,
+            orderNumber: order.orderNumber,
+            total: order.total,
+            idempotencyKey: saved?.idempotencyKey || undefined,
+          });
+        } else {
+          writePending(null);
+          clearIdempotencyKey();
+          try { await accountService.cancelOrder(order.id); } catch { /* ignore */ }
+        }
+      } catch {
+        // Leave the pending marker for the next attempt if this was a network error;
+        // the idempotency key still prevents a duplicate order.
+      } finally {
+        if (active) setRestoring(false);
+      }
+    };
+    restore();
+    return () => { active = false; };
+  }, []);
 
   const applyCoupon = async (raw) => {
     const c = (raw ?? couponCode).trim();
@@ -94,7 +207,7 @@ export default function Checkout() {
 
   const removeCoupon = () => { dispatch(clearCoupon()); toast('Coupon removed'); };
 
-  if (items.length === 0 && phase === 'idle') {
+  if (items.length === 0 && !pendingOrder && !restoring && phase === 'idle') {
     return (
       <div className="container-page py-16 text-center">
         <h1 className="text-2xl font-bold">Your cart is empty</h1>
@@ -105,7 +218,12 @@ export default function Checkout() {
   }
 
   // ── Address form (add / edit) ─────────────────────────────────────────
-  const openAdd = () => { setEditingId(null); setForm({ ...EMPTY, name: user?.name || '' }); setErrors({}); setModalOpen(true); };
+  const openAdd = () => {
+    setEditingId(null);
+    setForm({ ...EMPTY, name: user?.name || '', email: user?.email || '', phone: user?.phone || '' });
+    setErrors({});
+    setModalOpen(true);
+  };
   const openEdit = (a) => { setEditingId(a.id); setForm({ ...EMPTY, ...a }); setErrors({}); setModalOpen(true); };
   const updateForm = (e) => {
     const { name, value, type, checked } = e.target;
@@ -115,10 +233,12 @@ export default function Checkout() {
     const next = {};
     if (!required(form.name)) next.name = 'Name is required';
     if (!isPhone(form.phone)) next.phone = 'Enter a valid 10-digit number';
+    if (!isEmail(form.email)) next.email = 'Enter a valid email address';
     if (!required(form.line1)) next.line1 = 'Address is required';
     if (!required(form.city)) next.city = 'City is required';
     if (!required(form.state)) next.state = 'State is required';
     if (!/^\d{6}$/.test(form.pincode)) next.pincode = 'Enter a valid 6-digit pincode';
+    if (!required(form.country)) next.country = 'Country is required';
     setErrors(next);
     return Object.keys(next).length === 0;
   };
@@ -148,86 +268,117 @@ export default function Checkout() {
     setSaving(false);
   };
 
-  // Place order → create order (API) → create payment order → Razorpay → verify.
+  const toOrderAddress = (a) => ({
+    name: a.name || user?.name || '',
+    phone: a.phone || '',
+    email: a.email || user?.email || '',
+    line1: a.line1 || '',
+    line2: a.line2 || '',
+    city: a.city || '',
+    state: a.state || '',
+    postalCode: a.pincode || a.postalCode || '',
+    country: a.country || 'India',
+  });
+
+  // Place order → server order (PENDING) → Razorpay order → popup → server verify.
   const placeOrder = async () => {
-    if (!selectedAddress) { toast.error('Please select a delivery address'); setStep(0); return; }
+    if (placingRef.current) return;
+    if (DEMO_MODE) {
+      setErrorMsg('Checkout is disabled in demo mode. Set VITE_DEMO_MODE=false and run the ShopMart backend.');
+      setPhase('failed');
+      return;
+    }
+    if (!activeAddress) { toast.error('Please select a delivery address'); setStep(0); return; }
+    if (!isEmail(activeAddress.email || user?.email)) {
+      toast.error('Please add an email address to the delivery address');
+      setStep(0);
+      return;
+    }
+
+    placingRef.current = true;
     setPhase('processing');
     setErrorMsg('');
 
     try {
-      // 1. Create the order first (status PENDING / PAYMENT_INITIATED). Reuse it on retry.
+      // 1. Create (or reuse) the pending ShopMart order. The backend calculates the
+      //    amount from the server-side cart; client-supplied amounts are ignored.
       let order = createdOrderRef.current;
       if (!order) {
         setStatusText('Syncing your cart...');
         const { skipped } = await cartService.syncToBackend(items);
         if (skipped.length) {
-          throw Object.assign(
-            new Error(`${skipped.length} item(s) with a selected size/color can't be checked out yet — variant selection isn't wired to the backend cart. Remove them or check out without variants.`),
-            { cancelled: false }
-          );
+          throw new Error(`${skipped.length} item(s) with a selected size/color can't be checked out yet — variant selection isn't wired to the backend cart. Remove them or check out without variants.`);
         }
         setStatusText('Creating your order...');
+        const saved = readPending();
+        // Persisted before the request so a lost response can be retried safely.
+        const idempotencyKey = saved?.idempotencyKey || ensureIdempotencyKey();
         const payload = {
-          items: items.map((i) => ({
-            productId: i.productId, quantity: i.quantity, size: i.size, color: i.color,
-            price: i.price, name: i.name, image: i.image, slug: i.slug,
-          })),
-          shippingAddress: selectedAddress,
-          // Backend only accepts paymentMethod in {COD, UPI, CARD, NETBANKING,
-          // WALLET} — 'RAZORPAY' isn't one of them and was rejected with a 400
-          // at order creation, before the code ever got to open the Razorpay
-          // popup. Razorpay is the gateway, not the method; any non-COD value
-          // here routes through the same gateway flow on the backend, and the
-          // customer still picks UPI/Card/NetBanking/Wallet inside the Razorpay
-          // widget itself. Using CARD as the stored label until there's a
-          // method-selection step in the UI.
-          paymentMethod: 'CARD',
-          amount: total, subtotal, shipping, discount, couponCode: coupon?.code,
-          status: 'PAYMENT_INITIATED', paymentStatus: 'PENDING',
+          shippingAddress: toOrderAddress(activeAddress),
+          paymentMethod: 'RAZORPAY',
+          couponCode: coupon?.code || undefined,
         };
-        order = await accountService.placeOrder(payload);
+        order = await accountService.placeOrder(payload, idempotencyKey);
         createdOrderRef.current = order;
+        setPendingOrder(order);
+        writePending({
+          id: order.id, orderNumber: order.orderNumber,
+          total: order.total, idempotencyKey,
+        });
+        console.log('ShopMart order created', order.orderNumber);
       }
-      const orderId = order.id || order.orderId;
-      console.log('Order Created', orderId);
 
-      // 2 + 3. Create payment order from orderId, then open Razorpay.
-      setStatusText('Opening secure payment...');
-      const payload = { orderId, amount: total };
-      console.log('Payment Request', payload);
-      const result = await razorpayService.checkout({
+      const orderId = order.id;
+      if (!orderId) throw new Error('The server did not return an order id.');
+
+      // 2. If an earlier attempt might have succeeded, reconcile with Razorpay before
+      //    opening a second payment.
+      setStatusText('Checking your payment status...');
+      try {
+        const synced = await accountService.syncPaymentStatus(orderId);
+        if (synced?.paymentStatus === 'PAID') {
+          setStatusText('Payment confirmed');
+          setPhase('done');
+          const paid = await accountService.finalizePaidOrder(orderId);
+          finishSuccess(paid);
+          return;
+        }
+      } catch (syncErr) {
+        // A definitive 4xx/5xx blocks the retry; a transient network error is retried
+        // by the backend's own initiate sync.
+        if (syncErr?.response) throw syncErr;
+      }
+
+      // 3. Backend creates the Razorpay order; the popup must open here.
+      setStatusText('Opening secure Razorpay checkout...');
+      await razorpayService.checkout({
         orderId,
-        amount: total,
         name: 'ShopMart',
-        description: `Payment for order ${orderId}`,
+        description: `Payment for order ${order.orderNumber || orderId}`,
         prefill: {
-          name: selectedAddress?.name || user?.name || '',
-          email: user?.email || '',
-          contact: selectedAddress?.phone || user?.phone || '',
+          name: activeAddress?.name || user?.name || '',
+          email: activeAddress?.email || user?.email || '',
+          contact: activeAddress?.phone || user?.phone || '',
         },
-        notes: { receipt: `rcpt_${Date.now()}` },
+        notes: { receipt: `rcpt_${orderId}` },
       });
 
-      // 4. Payment verified inside checkout → finalize (PAID / CONFIRMED).
+      // 4. Razorpay verified server-side. Re-read the order and require PAID.
+      setStatusText('Confirming your payment...');
+      const paidOrder = await accountService.finalizePaidOrder(orderId);
       setPhase('done');
       setStatusText('Payment confirmed');
-      const finalOrder = (await accountService.finalizePaidOrder(orderId, result)) || {
-        ...order, paymentStatus: 'PAID', status: 'CONFIRMED',
-        razorpayPaymentId: result.paymentId, razorpayOrderId: result.razorpayOrderId,
-      };
-
-      clear();
-      dispatch(addNotification({
-        category: 'ORDER', icon: 'box', title: 'Payment successful',
-        body: `Your order ${orderId} has been confirmed. We'll notify you when it ships.`,
-        link: `/dashboard/orders/${orderId}`,
-      }));
-      await new Promise((r) => setTimeout(r, 400));
-      navigate(`/order-success/${orderId}`, { replace: true, state: { order: finalOrder } });
+      finishSuccess(paidOrder);
     } catch (err) {
-      // Order stays PENDING; allow retry against the same order.
+      // The pending order is intentionally kept: retry reuses it and its Razorpay order.
       setPhase('failed');
-      setErrorMsg(err?.cancelled ? 'Payment was cancelled before completion.' : (err?.message || 'Payment could not be completed. Please try again.'));
+      setErrorMsg(
+        err?.cancelled
+          ? 'Payment was cancelled before completion. Your cart and address are still saved.'
+          : (err?.response?.data?.message || err?.message || 'Payment could not be completed. Please try again.'),
+      );
+    } finally {
+      placingRef.current = false;
     }
   };
 
@@ -249,6 +400,33 @@ export default function Checkout() {
           </div>
         ))}
       </div>
+
+      {pendingOrder && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span>
+            Pending payment for order <span className="font-semibold">#{pendingOrder.orderNumber || pendingOrder.id}</span>.
+            Your cart is still saved.
+          </span>
+          <button
+            onClick={async () => {
+              try {
+                const synced = await accountService.syncPaymentStatus(pendingOrder.id);
+                if (synced?.paymentStatus === 'PAID') {
+                  const paid = await accountService.finalizePaidOrder(pendingOrder.id);
+                  finishSuccess(paid);
+                } else {
+                  toast.success('No completed payment found. You can retry.');
+                }
+              } catch (e) {
+                toast.error(e?.response?.data?.message || 'Could not refresh the payment status.');
+              }
+            }}
+            className="text-xs font-semibold underline"
+          >
+            Refresh status
+          </button>
+        </div>
+      )}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_360px]">
         <div className="card p-6">
@@ -279,6 +457,7 @@ export default function Checkout() {
                           <p className="mt-2 text-sm font-semibold text-ink">{a.name}</p>
                           <p className="text-xs text-ink-muted">{[a.line1, a.line2, a.city, a.state, a.pincode].filter(Boolean).join(', ')}</p>
                           <p className="text-xs text-ink-muted">Phone: {a.phone}</p>
+                          {a.email && <p className="text-xs text-ink-muted">Email: {a.email}</p>}
                           <button type="button" onClick={(e) => { e.preventDefault(); openEdit(a); }} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:text-brand-800"><Pencil className="h-3 w-3" /> Edit</button>
                         </div>
                       </div>
@@ -334,15 +513,18 @@ export default function Checkout() {
                 </div>
               ) : (
                 <>
-                  <h2 className="mb-4 text-lg font-semibold">Review &amp; place order</h2>
+                  <h2 className="mb-4 text-lg font-semibold">Review &amp; pay</h2>
 
                   {phase === 'failed' && (
                     <div className="mb-4 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4">
                       <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
                       <div className="flex-1">
-                        <p className="text-sm font-semibold text-red-700">Payment failed</p>
+                        <p className="text-sm font-semibold text-red-700">Payment not completed</p>
                         <p className="text-xs text-red-600/90">{errorMsg}</p>
-                        <Link to={`/payment-failed/${createdOrderRef.current?.id || createdOrderRef.current?.orderId || ''}?reason=${encodeURIComponent(errorMsg)}`} className="mt-1 inline-block text-xs font-medium text-red-700 underline">
+                        <Link
+                          to={`/payment-failed/${createdOrderRef.current?.id || ''}?reason=${encodeURIComponent(errorMsg)}${errorMsg.toLowerCase().includes('cancel') ? '&status=cancelled' : ''}`}
+                          className="mt-1 inline-block text-xs font-medium text-red-700 underline"
+                        >
                           View details
                         </Link>
                       </div>
@@ -350,8 +532,9 @@ export default function Checkout() {
                   )}
 
                   <div className="rounded-xl border border-slate-200 p-4 text-sm">
-                    <p className="font-semibold">{selectedAddress?.name} · {selectedAddress?.phone}</p>
-                    <p className="text-ink-soft">{[selectedAddress?.line1, selectedAddress?.line2, selectedAddress?.city, selectedAddress?.state, selectedAddress?.pincode].filter(Boolean).join(', ')}</p>
+                    <p className="font-semibold">{activeAddress?.name} · {activeAddress?.phone}</p>
+                    <p className="text-ink-soft">{[activeAddress?.line1, activeAddress?.line2, activeAddress?.city, activeAddress?.state, activeAddress?.pincode].filter(Boolean).join(', ')}</p>
+                    <p className="text-ink-soft">{activeAddress?.email || user?.email}</p>
                     <p className="mt-2 text-ink-muted">Payment: <span className="font-medium text-ink">Razorpay</span></p>
                   </div>
                   <div className="mt-4 divide-y divide-slate-100">
@@ -368,8 +551,8 @@ export default function Checkout() {
                   </div>
                   <div className="mt-6 flex gap-3">
                     <button onClick={() => setStep(1)} className="btn-outline">Back</button>
-                    <button onClick={placeOrder} className="btn-accent flex-1">
-                      {phase === 'failed' ? 'Retry Payment' : 'Place Order'} · {formatPrice(total)} <ArrowRight className="h-4 w-4" />
+                    <button onClick={placeOrder} disabled={phase === 'processing'} className="btn-accent flex-1">
+                      {phase === 'failed' ? 'Retry Payment' : 'Pay Now'} · {formatPrice(payable)} <ArrowRight className="h-4 w-4" />
                     </button>
                   </div>
                   <p className="mt-2 text-center text-xs text-ink-muted">You'll choose UPI / Card / Net Banking / Wallet in the Razorpay window</p>
@@ -423,7 +606,7 @@ export default function Checkout() {
               <div className="flex justify-between"><dt className="text-ink-muted">Items ({items.length})</dt><dd className="font-medium">{formatPrice(subtotal)}</dd></div>
               <div className="flex justify-between"><dt className="text-ink-muted">Shipping</dt><dd className="font-medium">{shipping === 0 ? 'Free' : formatPrice(shipping)}</dd></div>
               {discount > 0 && <div className="flex justify-between text-emerald-600"><dt>Discount ({coupon?.code})</dt><dd className="font-medium">−{formatPrice(discount)}</dd></div>}
-              <div className="flex justify-between border-t border-slate-100 pt-3 text-base font-bold"><dt>Total</dt><dd>{formatPrice(total)}</dd></div>
+              <div className="flex justify-between border-t border-slate-100 pt-3 text-base font-bold"><dt>Total</dt><dd>{formatPrice(payable)}</dd></div>
             </dl>
             <div className="mt-4 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
               <ShieldCheck className="h-4 w-4" /> 100% secure payments via Razorpay
@@ -456,14 +639,24 @@ export default function Checkout() {
             {errors.name && <p className="mt-1 text-xs text-red-600">{errors.name}</p>}
           </div>
           <div>
-            <label className="label">Phone</label>
+            <label className="label">Mobile number</label>
             <input name="phone" className="field" value={form.phone} onChange={updateForm} />
             {errors.phone && <p className="mt-1 text-xs text-red-600">{errors.phone}</p>}
           </div>
           <div>
-            <label className="label">Pincode</label>
+            <label className="label">Email address</label>
+            <input name="email" type="email" className="field" value={form.email} onChange={updateForm} />
+            {errors.email && <p className="mt-1 text-xs text-red-600">{errors.email}</p>}
+          </div>
+          <div>
+            <label className="label">PIN code</label>
             <input name="pincode" className="field" value={form.pincode} onChange={updateForm} />
             {errors.pincode && <p className="mt-1 text-xs text-red-600">{errors.pincode}</p>}
+          </div>
+          <div>
+            <label className="label">Country</label>
+            <input name="country" className="field" value={form.country} onChange={updateForm} />
+            {errors.country && <p className="mt-1 text-xs text-red-600">{errors.country}</p>}
           </div>
           <div className="sm:col-span-2">
             <label className="label">Address line 1</label>

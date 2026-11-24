@@ -14,6 +14,7 @@ export default function OtpVerification() {
   const location = useLocation();
   const dispatch = useDispatch();
   const email = location.state?.email || '';
+  const from = location.state?.from || '';
   const demo = location.state?.demo;
 
   const [digits, setDigits] = useState(Array(LENGTH).fill(''));
@@ -61,16 +62,21 @@ export default function OtpVerification() {
     setSubmitting(true);
     try {
       const data = await authService.verifyOtp({ email, code });
-      if (data?.user) dispatch(setUser(data.user));
-      toast.success('Verified! Your account is ready.');
-      navigate('/login', { replace: true });
+      if (data?.user) {
+        dispatch(setUser(data.user));
+        toast.success('Verified! Your account is ready.');
+        navigate(from || '/', { replace: true });
+        return;
+      }
+      toast.success('Verified! Please sign in to continue.');
+      navigate('/login', { replace: true, state: { from } });
     } catch (err) {
       if (err?.response) {
         toast.error(err.response.data?.message || 'Invalid or expired code');
       } else {
         // Demo fallback
         toast.success('Verified (demo). Please sign in.');
-        navigate('/login', { replace: true });
+        navigate('/login', { replace: true, state: { from } });
       }
     } finally {
       setSubmitting(false);
@@ -129,7 +135,7 @@ export default function OtpVerification() {
       </p>
 
       <p className="mt-2 text-sm">
-        <Link to="/register" className="link">Back to sign up</Link>
+        <Link to="/register" state={{ from }} className="link">Back to sign up</Link>
       </p>
     </div>
   );

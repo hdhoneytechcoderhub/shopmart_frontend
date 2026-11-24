@@ -102,8 +102,21 @@ export const analyticsService = {
   )),
 
   // Admin-wide recent orders across all customers.
-  // Real endpoint: GET /admin/orders/recent → [{ id, customer, date, total, status }]
-  getRecentOrders: () => read('/admin/orders/recent', { size: 5 }, () => adminRecentOrders),
+  // Real endpoint: GET /admin/orders/recent → [{ id, orderNumber, customerName, status,
+  //   total, createdAt, ... }]. The dashboard table reads the older
+  // { id, customer, date, total, status } shape, so backend rows are mapped here.
+  getRecentOrders: async () => {
+    const rows = await read('/admin/orders/recent', { size: 5 }, () => adminRecentOrders);
+    if (!Array.isArray(rows) || rows.length === 0) return rows || [];
+    if (rows[0].orderNumber === undefined) return rows; // already demo-shaped
+    return rows.map((o) => ({
+      id: o.orderNumber,
+      customer: o.customerName || 'Customer',
+      date: o.createdAt,
+      total: o.total,
+      status: o.status,
+    }));
+  },
 
   // ── Analytics chart series (admin + super admin) ───────────────────────
   // Real endpoints: GET /admin/analytics/sales, /top-products, /order-status

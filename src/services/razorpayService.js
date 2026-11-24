@@ -1,16 +1,20 @@
-import api, { DEMO_MODE } from './api';
+import api from './api';
 import { RAZORPAY_KEY_ID } from '../utils/constants';
 
-// Razorpay integration.
-// Flow (matches backend):
-//   Order is already created (POST /orders) → we pass its orderId here →
-//   POST /payments/create-order { orderId } → returns Razorpay order id + amount →
-//   open Razorpay checkout → POST /payments/verify.
+// Real Razorpay integration.
 //
-// In demo mode / when no key is set, a realistic simulated flow runs so the
-// journey works standalone.
+//   1. POST /orders (done by Checkout) creates a PENDING order from the server cart.
+//   2. POST /payments/create-order { orderId } → backend creates the Razorpay order
+//      with the backend-calculated amount and returns order id + key id.
+//   3. Open the official Razorpay Checkout with that order id.
+//   4. POST /payments/verify → backend verifies the signature AND re-reads the payment
+//      from Razorpay before marking the ShopMart order PAID.
+//
+// There is deliberately NO simulated-success fallback: if the backend or Razorpay is
+// unavailable, checkout fails instead of confirming an unpaid order.
 
 let scriptPromise = null;
+let inFlight = null; // { orderId, promise } — absorbs repeated clicks on the same order
 
 export const loadRazorpay = () => {
   if (typeof window === 'undefined') return Promise.resolve(false);
@@ -19,96 +23,146 @@ export const loadRazorpay = () => {
   scriptPromise = new Promise((resolve) => {
     const s = document.createElement('script');
     s.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    s.async = true;
     s.onload = () => resolve(true);
-    s.onerror = () => resolve(false);
+    s.onerror = () => { scriptPromise = null; resolve(false); };
     document.body.appendChild(s);
   });
   return scriptPromise;
 };
 
-export const razorpayLive = () => !DEMO_MODE && !!RAZORPAY_KEY_ID;
+const toMinor = (payOrder) => {
+  if (payOrder?.amountMinor != null) return Number(payOrder.amountMinor);
+  return Math.round(Number(payOrder?.amount || 0) * 100);
+};
 
 export const razorpayService = {
-  // Create the Razorpay payment order from an existing backend order id.
-  // Backend: POST /payments/create-order  body: { orderId }
-  async createOrder({ orderId, amount }) {
-    if (!razorpayLive()) {
-      return {
-        razorpayOrderId: `order_demo_${Date.now()}`,
-        amount: Math.round((amount || 0) * 100),
-        currency: 'INR',
-        keyId: RAZORPAY_KEY_ID || 'rzp_test_demo',
-      };
-    }
+  async createOrder(orderId) {
     const { data } = await api.post('/payments/create-order', { orderId });
-    return {
-      razorpayOrderId: data.razorpayOrderId || data.orderId || data.id,
-      amount: data.amount ?? Math.round((amount || 0) * 100),
-      currency: data.currency || 'INR',
-      keyId: data.keyId || data.key || RAZORPAY_KEY_ID,
-    };
+    if (!data?.razorpayOrderId) {
+      throw new Error(data?.message || 'The server did not return a Razorpay order.');
+    }
+    return data;
   },
 
-  // Verify the payment signature server-side.
-  // Backend: POST /payments/verify
-  async verify(payload) {
-    if (!razorpayLive()) return { verified: true };
-    const { data } = await api.post('/payments/verify', payload);
-    return data ?? { verified: true };
+  async verify(orderId, response) {
+    const { data } = await api.post('/payments/verify', {
+      orderId,
+      razorpay_order_id: response.razorpay_order_id,
+      razorpay_payment_id: response.razorpay_payment_id,
+      razorpay_signature: response.razorpay_signature,
+    });
+    // The backend only returns after signature + Razorpay status verification.
+    if (!data || (data.status !== 'SUCCESS' && data.status !== 'PAID')) {
+      throw new Error('Payment could not be verified by the server.');
+    }
+    return data;
   },
 
-  // Open checkout for an existing order. Resolves with the payment result.
-  async checkout({ orderId, amount, currency = 'INR', name = 'ShopMart', description = 'Order payment', prefill = {}, notes = {} }) {
-    // 2 + 3. Create the payment order from the backend order id.
-    const payOrder = await this.createOrder({ orderId, amount });
-    console.log('Order Created', orderId);
-    console.log('Payment Request', { orderId, razorpayOrderId: payOrder.razorpayOrderId, amount: payOrder.amount, currency: payOrder.currency });
+  async syncStatus(orderId) {
+    const { data } = await api.post(`/payments/order/${orderId}/sync`);
+    return data;
+  },
 
-    // Demo / no real key: simulate success (still verifies through the stub).
-    if (!razorpayLive()) {
-      console.log('Opening Razorpay (simulated)');
-      await new Promise((r) => setTimeout(r, 600));
-      const paymentId = `pay_demo_${Date.now().toString().slice(-10)}`;
-      await this.verify({ razorpay_order_id: payOrder.razorpayOrderId, razorpay_payment_id: paymentId, razorpay_signature: 'demo', orderId });
-      return { paymentId, orderId, razorpayOrderId: payOrder.razorpayOrderId, signature: 'demo', simulated: true };
+  async markFailed(orderId, reason) {
+    try {
+      await api.post(`/payments/${orderId}/fail`, null, { params: { reason } });
+    } catch {
+      // Best-effort: if this fails the order simply stays PENDING and can be retried.
+    }
+  },
+
+  async checkout({ orderId, name = 'ShopMart', description = 'Order payment', prefill = {}, notes = {} }) {
+    if (inFlight && inFlight.orderId === orderId) return inFlight.promise;
+    const promise = this.openCheckout({ orderId, name, description, prefill, notes });
+    inFlight = { orderId, promise };
+    try {
+      return await promise;
+    } finally {
+      if (inFlight && inFlight.promise === promise) inFlight = null;
+    }
+  },
+
+  async openCheckout({ orderId, name, description, prefill, notes }) {
+    // Backend creates the Razorpay order using the trusted order total.
+    const payOrder = await this.createOrder(orderId);
+    if (String(payOrder.provider || 'razorpay').toLowerCase() !== 'razorpay') {
+      throw new Error('The configured payment gateway is not Razorpay.');
+    }
+    const key = payOrder.keyId || RAZORPAY_KEY_ID;
+    if (!key) {
+      throw new Error('Razorpay is not configured on the server (missing key id).');
+    }
+    const amount = toMinor(payOrder);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('The server returned an invalid payable amount.');
     }
 
-    // 5. Ensure the SDK is loaded before opening.
-    await loadRazorpay();
-    if (!window.Razorpay) throw new Error('Razorpay SDK not loaded');
+    const loaded = await loadRazorpay();
+    if (!loaded || !window.Razorpay) {
+      throw new Error('Could not load the Razorpay checkout. Check your connection and try again.');
+    }
 
-    console.log('Opening Razorpay');
     return new Promise((resolve, reject) => {
-      const rzp = new window.Razorpay({
-        key: payOrder.keyId,
-        amount: payOrder.amount,
-        currency: payOrder.currency,
-        name,
-        description,
-        order_id: payOrder.razorpayOrderId,
-        prefill,
-        notes: { ...notes, orderId },
-        theme: { color: '#4f46e5' },
-        handler: async (resp) => {
-          try {
-            const result = await this.verify({
-              razorpay_order_id: resp.razorpay_order_id,
-              razorpay_payment_id: resp.razorpay_payment_id,
-              razorpay_signature: resp.razorpay_signature,
-              orderId,
-            });
-            if (result && result.verified === false) { reject(new Error('Payment verification failed.')); return; }
-            resolve({
-              paymentId: resp.razorpay_payment_id,
-              orderId,
-              razorpayOrderId: resp.razorpay_order_id,
-              signature: resp.razorpay_signature,
-            });
-          } catch (err) { reject(err); }
-        },
-        modal: { ondismiss: () => reject(Object.assign(new Error('Payment cancelled'), { cancelled: true })) },
+      let settled = false;
+      let lastFailure = null;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        fn(value);
+      };
+
+      let rzp;
+      try {
+        rzp = new window.Razorpay({
+          key,
+          amount,
+          currency: payOrder.currency || 'INR',
+          name,
+          description,
+          order_id: payOrder.razorpayOrderId,
+          prefill,
+          notes: { ...notes, shopmartOrderId: String(orderId) },
+          theme: { color: '#4f46e5' },
+          handler: async (response) => {
+            try {
+              const payment = await razorpayService.verify(orderId, response);
+              finish(resolve, {
+                paymentId: response.razorpay_payment_id,
+                razorpayOrderId: response.razorpay_order_id,
+                signature: response.razorpay_signature,
+                payment,
+              });
+            } catch (err) {
+              finish(reject, err);
+            }
+          },
+          modal: {
+            ondismiss: async () => {
+              if (settled) return;
+              // Razorpay lets the customer retry after payment.failed inside the same
+              // window; only a dismiss ends this attempt.
+              const reason = lastFailure ? 'PAYMENT_FAILED' : 'PAYMENT_CANCELLED';
+              await razorpayService.markFailed(orderId, reason);
+              const err = Object.assign(
+                new Error(lastFailure?.description || 'Payment was cancelled before completion.'),
+                { cancelled: !lastFailure, failed: !!lastFailure, paymentFailed: !!lastFailure },
+              );
+              finish(reject, err);
+            },
+          },
+        });
+      } catch {
+        finish(reject, new Error('Could not open the Razorpay checkout window.'));
+        return;
+      }
+
+      rzp.on('payment.failed', (response) => {
+        lastFailure = response?.error || { description: 'Payment failed' };
+        // Keep the popup open so the customer can retry; the outcome is decided by
+        // handler (success) or modal.ondismiss (failure/cancel).
       });
-      rzp.on('payment.failed', (resp) => reject(new Error(resp?.error?.description || 'Payment failed')));
+
       rzp.open();
     });
   },

@@ -3,11 +3,11 @@ import { MapPin, Plus, Pencil, Trash2, Star } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { accountService } from '../../services/accountService';
 import { mockAddresses } from '../../services/mockAccount';
-import { isPhone, required } from '../../utils/validators';
+import { isEmail, isPhone, required } from '../../utils/validators';
 import Modal from '../../components/common/Modal';
 import EmptyState from '../../components/common/EmptyState';
 
-const EMPTY = { label: 'Home', name: '', line1: '', line2: '', city: '', state: '', pincode: '', phone: '', isDefault: false };
+const EMPTY = { label: 'Home', name: '', line1: '', line2: '', city: '', state: '', pincode: '', phone: '', email: '', country: 'India', isDefault: false };
 
 export default function Addresses() {
   const [addresses, setAddresses] = useState([]);
@@ -35,9 +35,11 @@ export default function Addresses() {
   const validate = () => {
     const next = {};
     if (!required(form.name)) next.name = 'Name is required';
+    if (!isEmail(form.email)) next.email = 'Enter a valid email address';
     if (!required(form.line1)) next.line1 = 'Address is required';
     if (!required(form.city)) next.city = 'City is required';
     if (!required(form.state)) next.state = 'State is required';
+    if (!required(form.country)) next.country = 'Country is required';
     if (!/^\d{6}$/.test(form.pincode)) next.pincode = 'Enter a valid 6-digit pincode';
     if (!isPhone(form.phone)) next.phone = 'Enter a valid 10-digit number';
     setErrors(next);
@@ -208,6 +210,16 @@ export default function Addresses() {
             <label className="label">Phone</label>
             <input name="phone" className="field" value={form.phone} onChange={update} />
             {errors.phone && <p className="mt-1 text-xs text-red-600">{errors.phone}</p>}
+          </div>
+          <div>
+            <label className="label">Email</label>
+            <input name="email" type="email" className="field" value={form.email} onChange={update} />
+            {errors.email && <p className="mt-1 text-xs text-red-600">{errors.email}</p>}
+          </div>
+          <div>
+            <label className="label">Country</label>
+            <input name="country" className="field" value={form.country} onChange={update} />
+            {errors.country && <p className="mt-1 text-xs text-red-600">{errors.country}</p>}
           </div>
           <label className="inline-flex items-center gap-2 text-sm text-ink-soft sm:col-span-2">
             <input type="checkbox" name="isDefault" checked={form.isDefault} onChange={update} className="rounded border-slate-300 text-brand-600 focus:ring-brand-500" />

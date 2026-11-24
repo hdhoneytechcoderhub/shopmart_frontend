@@ -13,7 +13,7 @@ export default function AdminLogin() {
   const navigate = useNavigate();
 
   const [form, setForm] = useState({
-    email: 'admin@shopmart.com',
+    email: 'admin@shopmart.local',
     password: '',
     remember: true,
   });
